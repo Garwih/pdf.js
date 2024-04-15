@@ -37,11 +37,17 @@ import { preprocess } from "./external/builder/builder.mjs";
 import rename from "gulp-rename";
 import replace from "gulp-replace";
 import rimraf from "rimraf";
+import rollupAlias from "@rollup/plugin-alias";
+import { babel as rollupBabel } from "@rollup/plugin-babel";
+import rollupCommonjs from "@rollup/plugin-commonjs";
+import { nodeResolve as rollupNodeResolve } from "@rollup/plugin-node-resolve";
+import rollupStream from "@rollup/stream";
 import stream from "stream";
 import streamqueue from "streamqueue";
 import TerserPlugin from "terser-webpack-plugin";
 import through from "through2";
 import Vinyl from "vinyl";
+import vinylSource from "vinyl-source-stream";
 import webpack2 from "webpack";
 import webpackStream from "webpack-stream";
 import zip from "gulp-zip";
@@ -390,6 +396,155 @@ function createWebpackConfig(
   };
 }
 
+function createRollupConfig(
+  defines,
+  output,
+  {
+    disableVersionInfo = false,
+    disableSourceMaps = false,
+    disableLicenseHeader = false,
+    defaultPreferencesDir = null,
+  } = {}
+) {
+  const versionInfo = !disableVersionInfo
+    ? getVersionJSON()
+    : { version: 0, commit: 0 };
+  const bundleDefines = {
+    ...defines,
+    BUNDLE_VERSION: versionInfo.version,
+    BUNDLE_BUILD: versionInfo.commit,
+    TESTING: defines.TESTING ?? process.env.TESTING === "true",
+    BROWSER_PREFERENCES: defaultPreferencesDir
+      ? getBrowserPreferences(defaultPreferencesDir)
+      : {},
+    DEFAULT_PREFERENCES: defaultPreferencesDir
+      ? getDefaultPreferences(defaultPreferencesDir)
+      : {},
+    DEFAULT_FTL: defines.GENERIC ? getDefaultFtl() : "",
+  };
+  const licenseHeaderLibre = fs
+    .readFileSync("./src/license_header_libre.js")
+    .toString();
+  // const enableSourceMaps =
+  //   !bundleDefines.MOZCENTRAL &&
+  //   !bundleDefines.CHROME &&
+  //   !bundleDefines.LIB &&
+  //   !bundleDefines.MINIFIED &&
+  //   !bundleDefines.TESTING &&
+  //   !disableSourceMaps;
+  // const isModule = output.library?.type === "module";
+  // const isMinified = bundleDefines.MINIFIED;
+  const skipBabel = bundleDefines.SKIP_BABEL;
+
+  // const babelExcludeRegExp = [
+  //   // `core-js`, see https://github.com/zloirock/core-js/issues/514,
+  //   // should be excluded from processing.
+  //   /node_modules[\\/]core-js/,
+  // ];
+
+  const babelPresets = skipBabel
+    ? undefined
+    : [["@babel/preset-env", BABEL_PRESET_ENV_OPTS]];
+  const babelPlugins = [
+    [
+      babelPluginPDFJSPreprocessor,
+      {
+        rootPath: __dirname,
+        defines: bundleDefines,
+      },
+    ],
+  ];
+
+  const plugins = [];
+  if (!disableLicenseHeader) {
+    plugins.push(
+      new webpack2.BannerPlugin({ banner: licenseHeaderLibre, raw: true })
+    );
+  }
+
+  const alias = createWebpackAlias(bundleDefines);
+  // const experiments = isModule ? { outputModule: true } : undefined;
+
+  // Required to expose e.g., the `window` object.
+  output.globalObject = "globalThis";
+
+  // return {
+  //   mode: "production",
+  //   optimization: {
+  //     mangleExports: false,
+  //     minimize: isMinified,
+  //     minimizer: !isMinified
+  //       ? undefined
+  //       : [
+  //           new TerserPlugin({
+  //             extractComments: false,
+  //             parallel: false,
+  //             terserOptions: {
+  //               compress: {
+  //                 // V8 chokes on very long sequences, work around that.
+  //                 sequences: false,
+  //               },
+  //               mangle: {
+  //                 // Ensure that the `tweakWebpackOutput` function works.
+  //                 reserved: ["__webpack_exports__"],
+  //               },
+  //               keep_classnames: true,
+  //               keep_fnames: true,
+  //               module: isModule,
+  //             },
+  //           }),
+  //         ],
+  //   },
+  //   experiments,
+  //   output,
+  //   performance: {
+  //     hints: false, // Disable messages about larger file sizes.
+  //   },
+  //   plugins,
+  //   resolve: {
+  //     alias,
+  //   },
+  //   devtool: enableSourceMaps ? "source-map" : undefined,
+  //   module: {
+  //     rules: [
+  //       {
+  //         loader: "babel-loader",
+  //         exclude: babelExcludeRegExp,
+  //         options: {
+  //           presets: babelPresets,
+  //           plugins: babelPlugins,
+  //           targets: BABEL_TARGETS,
+  //         },
+  //       },
+  //     ],
+  //   },
+  //   // Avoid shadowing actual Node.js variables with polyfills, by disabling
+  //   // polyfills/mocks - https://webpack.js.org/configuration/node/
+  //   node: false,
+  // };
+  return {
+    input: "./web/viewer.js",
+    output: {
+      file: "viewer.js",
+      format: "es",
+    },
+    plugins: [
+      rollupAlias({
+        entries: alias,
+      }),
+      rollupNodeResolve(),
+      rollupCommonjs(),
+      rollupBabel({
+        exclude: [/\/core-js\//],
+        babelHelpers: "bundled",
+        presets: babelPresets,
+        plugins: babelPlugins,
+        targets: BABEL_TARGETS,
+      }),
+    ],
+  };
+}
+
 function webpack2Stream(webpackConfig) {
   // Replacing webpack1 to webpack2 in the webpack-stream.
   return webpackStream(webpackConfig, webpack2);
@@ -564,7 +719,19 @@ function createWorkerBundle(defines) {
 }
 
 function createWebBundle(defines, options) {
-  const viewerFileConfig = createWebpackConfig(
+  // const viewerFileConfig = createWebpackConfig(
+  //   defines,
+  //   {
+  //     filename: "viewer.mjs",
+  //     library: {
+  //       type: "module",
+  //     },
+  //   },
+  //   {
+  //     defaultPreferencesDir: options.defaultPreferencesDir,
+  //   }
+  // );
+  const viewerRollupConfig = createRollupConfig(
     defines,
     {
       filename: "viewer.mjs",
@@ -576,7 +743,9 @@ function createWebBundle(defines, options) {
       defaultPreferencesDir: options.defaultPreferencesDir,
     }
   );
-  return gulp.src("./web/viewer.js").pipe(webpack2Stream(viewerFileConfig));
+
+  return rollupStream(viewerRollupConfig).pipe(vinylSource("viewer.mjs"));
+  // return gulp.src("./web/viewer.js").pipe(webpack2Stream(viewerFileConfig));
 }
 
 function createGVWebBundle(defines, options) {
