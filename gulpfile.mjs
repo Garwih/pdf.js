@@ -89,12 +89,11 @@ const config = JSON.parse(fs.readFileSync(CONFIG_FILE).toString());
 
 const ENV_TARGETS = [
   "last 2 versions",
-  "Chrome >= 98",
+  "Chrome >= 89",
   "Firefox ESR",
-  "Safari >= 15.4",
+  "Safari >= 15",
   "Node >= 18",
   "> 1%",
-  "not IE > 0",
   "not dead",
 ];
 
